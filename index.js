@@ -6,6 +6,10 @@ const dayjs = require('dayjs');
 dayjs().format();
 const fs = require('node:fs');
 
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /* Default behavior: look at the most recent shipment. */
 async function main() {
     const BASE_ID = process.env.AIRTABLE_BASE_ID;
@@ -24,46 +28,15 @@ async function main() {
         we'd need the frontend to be able to choose the shipment. Due to API
         rate limits, we should only list records from one shipment every 1-2 seconds. */
     let data = await response.json();
-
-    let TABLE_ID = data.tables.at(-1).id;
-
-    /* Fetch all the records from this particular shipment. (Is there a way to sort by expy date on
-        the Airtable API side?). Shipment records usually don't exceed 100 entries per table, so the
-        default page-size of 100 records fetched is fine for now. */
-    url = `https://api.airtable.com/v0/${BASE_ID}/${TABLE_ID}`
-    response = await fetch(url, {
-        headers: {
-            "Authorization": `Bearer ${TOKEN}`
-        }
-    })
-
-    data = await response.json();
+    //console.log(data);
 
     /* Sort the SKUs into their own buckets (30, 60, 90 days within expiration). */
     const alias_map = {
         expiration_date : ['expiration date', 'expy date'],
+        sku : ['sku'],
+        name : ['name.'],
     };
-
-    /* Find the field name for the expiration date. */
-    let field_name;
-    let found = false;
-    for (field_name in data.records[0].fields) {
-        for (const alias of alias_map.expiration_date) {
-            if (field_name.toLowerCase().includes(alias)) {
-                found = true;
-                break;
-            }
-        }
-        if (found) {
-            break;
-        }
-    }
-
-    if (!found) {
-        console.log("Couldn't find expiration field.");
-        return;
-    }
-
+    /* This script could run on older shipments. */
     const buckets = {
         expired: [],
         expires_30: [],
@@ -73,20 +46,115 @@ async function main() {
 
     const today = dayjs();
 
-    data.records.forEach(record => {
-        const exp_date = dayjs(record.fields[field_name]);
-        const diff_days = exp_date.diff(today, 'days');
+    let expy_field_name;
+    let sku_field_name;
+    let name_field;
+    let found;
+    let TABLE_ID;
+    /* Want to iterate through all the tables. */
+    for (const table of data.tables) {
+        TABLE_ID = table.id;
 
-        if (diff_days < 0) {
-            buckets.expired.push(record.fields);
-        } else if (diff_days < 30) {
-            buckets.expires_30.push(record.fields);
-        } else if (diff_days < 60) {
-            buckets.expires_60.push(record.fields);
-        } else if (diff_days < 90) {
-            buckets.expires_90.push(record.fields);
+        /* Fetch all the records from this particular shipment. (Is there a way to sort by expy date on
+        the Airtable API side?). Shipment records usually don't exceed 100 entries per table, so the
+        default page-size of 100 records fetched is fine for now. */
+        await delay(500);
+        url = `https://api.airtable.com/v0/${BASE_ID}/${TABLE_ID}`
+        response = await fetch(url, {
+            headers: {
+                "Authorization": `Bearer ${TOKEN}`
+            }
+        });
+
+        data = await response.json();
+        // console.dir(data, {depth: null, color: true});
+
+        /* Find the field name for the expiration date */
+        found = false;
+        for (expy_field_name in data.records[0].fields) {
+            for (const alias of alias_map.expiration_date) {
+                if (expy_field_name.toLowerCase().includes(alias)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                break;
+            }
         }
-    });
+
+        if (!found) {
+            console.log(`Couldn't find expiration field for ${table.name}.`);
+            continue;
+        }
+
+        /* Find the field name for the SKUs. Should be an exact match to avoid
+            FNSKU. */
+        found = false;
+        for (sku_field_name in data.records[0].fields) {
+            for (const alias of alias_map.sku) {
+                if (sku_field_name.toLowerCase() == (alias)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                break;
+            }
+        }
+
+        if (!found) {
+            console.log(`Couldn't find sku field for ${table.name}.`);
+            continue;
+        }
+
+        /* Find the field name for the Name. */
+        found = false;
+        for (name_field in data.records[0].fields) {
+            for (const alias of alias_map.name) {
+                if (name_field.toLowerCase().includes(alias)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (found) {
+                break;
+            }
+        }
+
+        if (!found) {
+            console.log(`Couldn't find name field for ${table.name}.`);
+            continue;
+        }
+
+        data.records.forEach(record => {
+            const exp_date = dayjs(record.fields[expy_field_name]);
+            const diff_days = exp_date.diff(today, 'days');
+
+            const obj = {
+                SKU: record.fields[sku_field_name],
+                EXP: record.fields[expy_field_name],
+                SHIPMENT: table.name,
+                NAME: record.fields[name_field],
+            };
+
+            /* Ignore empty records and no expiration date records. */
+            if (!(obj.SKU && obj.EXP && obj.NAME)) {
+                return;
+            }
+
+            if (diff_days < 0) {
+                buckets.expired.push(obj);
+            } else if (diff_days < 30) {
+                buckets.expires_30.push(obj);
+            } else if (diff_days < 60) {
+                buckets.expires_60.push(obj);
+            } else if (diff_days < 90) {
+                buckets.expires_90.push(obj);
+            }
+        });
+
+    }
 
     console.dir(buckets);
 
